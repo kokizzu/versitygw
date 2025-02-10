@@ -16,6 +16,8 @@ package main
 
 import (
 	"fmt"
+	"io/fs"
+	"math"
 
 	"github.com/urfave/cli/v2"
 	"github.com/versity/versitygw/backend/scoutfs"
@@ -48,7 +50,34 @@ move interfaces as well as support for tiered filesystems.`,
 				Name:        "glacier",
 				Usage:       "enable glacier emulation mode",
 				Aliases:     []string{"g"},
+				EnvVars:     []string{"VGW_SCOUTFS_GLACIER"},
 				Destination: &glacier,
+			},
+			&cli.BoolFlag{
+				Name:        "chuid",
+				Usage:       "chown newly created files and directories to client account UID",
+				EnvVars:     []string{"VGW_CHOWN_UID"},
+				Destination: &chownuid,
+			},
+			&cli.BoolFlag{
+				Name:        "chgid",
+				Usage:       "chown newly created files and directories to client account GID",
+				EnvVars:     []string{"VGW_CHOWN_GID"},
+				Destination: &chowngid,
+			},
+			&cli.BoolFlag{
+				Name:        "bucketlinks",
+				Usage:       "allow symlinked directories at bucket level to be treated as buckets",
+				EnvVars:     []string{"VGW_BUCKET_LINKS"},
+				Destination: &bucketlinks,
+			},
+			&cli.UintFlag{
+				Name:        "dir-perms",
+				Usage:       "default directory permissions for new directories",
+				EnvVars:     []string{"VGW_DIR_PERMS"},
+				Destination: &dirPerms,
+				DefaultText: "0755",
+				Value:       0755,
 			},
 		},
 	}
@@ -59,15 +88,21 @@ func runScoutfs(ctx *cli.Context) error {
 		return fmt.Errorf("no directory provided for operation")
 	}
 
-	var opts []scoutfs.Option
-	if glacier {
-		opts = append(opts, scoutfs.WithGlacierEmulation())
+	if dirPerms > math.MaxUint32 {
+		return fmt.Errorf("invalid directory permissions: %d", dirPerms)
 	}
 
-	be, err := scoutfs.New(ctx.Args().Get(0), opts...)
+	var opts scoutfs.ScoutfsOpts
+	opts.GlacierMode = glacier
+	opts.ChownUID = chownuid
+	opts.ChownGID = chowngid
+	opts.BucketLinks = bucketlinks
+	opts.NewDirPerm = fs.FileMode(dirPerms)
+
+	be, err := scoutfs.New(ctx.Args().Get(0), opts)
 	if err != nil {
 		return fmt.Errorf("init scoutfs: %v", err)
 	}
 
-	return runGateway(ctx, be, be)
+	return runGateway(ctx.Context, be)
 }

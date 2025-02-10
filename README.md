@@ -1,4 +1,4 @@
-# The Versity Gateway:<br/>A High-Performance S3 to Storage System Translation Service
+# The Versity S3 Gateway:<br/>A High-Performance S3 Translation Service
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="https://github.com/versity/versitygw/blob/assets/assets/logo-white.svg">
@@ -6,12 +6,36 @@
   <a href="https://www.versity.com"><img alt="Versity Software logo image." src="https://github.com/versity/versitygw/blob/assets/assets/logo.svg"></a>
 </picture>
 
- [![Apache V2 License](https://img.shields.io/badge/license-Apache%20V2-blue.svg)](https://github.com/versity/versitygw/blob/main/LICENSE)  
+ [![Apache V2 License](https://img.shields.io/badge/license-Apache%20V2-blue.svg)](https://github.com/versity/versitygw/blob/main/LICENSE) [![Go Report Card](https://goreportcard.com/badge/github.com/versity/versitygw)](https://goreportcard.com/report/github.com/versity/versitygw) [![Go Reference](https://pkg.go.dev/badge/github.com/versity/versitygw.svg)](https://pkg.go.dev/github.com/versity/versitygw)
 
-**Current status:** Alpha, in development not yet suited for production use
+### Binary release builds
+Download [latest release](https://github.com/versity/versitygw/releases)
+ | Linux/amd64 | Linux/arm64 | MacOS/amd64 | MacOS/arm64 | BSD/amd64 | BSD/arm64 |
+ |:-----------:|:-----------:|:-----------:|:-----------:|:---------:|:---------:|
+ |    ✔️    |  ✔️  |   ✔️   |  ✔️   |  ✔️   |  ✔️   |
+ 
+### Use Cases
+* Turn your local filesystem into an S3 server with a single command!
+* Proxy S3 requests to S3 storage
+* Simple to deploy S3 server with a single command
+* Protocol compatibility in `posix` allows common access to files via posix or S3
+* Simplified interface for adding new storage system support
 
+### News
+Check out latest wiki articles: [https://github.com/versity/versitygw/wiki/Articles](https://github.com/versity/versitygw/wiki/Articles)
+
+### Mailing List
+Keep up to date with latest gateway announcements by signing up to the [versitygw mailing list](https://www.versity.com/products/versitygw#signup).
+
+### Documentation
 See project [documentation](https://github.com/versity/versitygw/wiki) on the wiki.
 
+### Need help?
+Ask questions in the [community discussions](https://github.com/versity/versitygw/discussions).
+<br>
+Contact [Versity Sales](https://www.versity.com/contact/) to discuss enterprise support.
+
+### Overview
 Versity Gateway, a simple to use tool for seamless inline translation between AWS S3 object commands and storage systems. The Versity Gateway bridges the gap between S3-reliant applications and other storage systems, enabling enhanced compatibility and integration while offering exceptional scalability.
 
 The server translates incoming S3 API requests and transforms them into equivalent operations to the backend service. By leveraging this gateway server, applications can interact with the S3-compatible API on top of already existing storage systems. This project enables leveraging existing infrastructure investments while seamlessly integrating with S3-compatible systems, offering increased flexibility and compatibility in managing data storage.
@@ -44,7 +68,7 @@ The command format is
 ```
 versitygw [global options] command [command options] [arguments...]
 ```
-The global options are specified before the backend type and the backend options are specified after.
+The [global options](https://github.com/versity/versitygw/wiki/Global-Options) are specified before the backend type and the backend options are specified after.
 
 ***
 

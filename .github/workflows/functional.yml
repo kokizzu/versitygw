@@ -1,24 +1,25 @@
 name: functional tests
-on: pull_request
-jobs:
 
+on: pull_request
+
+jobs:
   build:
     name: RunTests
     runs-on: ubuntu-latest
     steps:
 
+    - name: Checkout
+      uses: actions/checkout@v4
+
     - name: Set up Go
-      uses: actions/setup-go@v4
+      uses: actions/setup-go@v5
       with:
         go-version: 'stable'
       id: go
 
-    - name: Check out code into the Go module directory
-      uses: actions/checkout@v3
-
     - name: Get Dependencies
       run: |
-        go get -v -t -d ./...
+        go mod download
 
     - name: Build and Run
       run: |

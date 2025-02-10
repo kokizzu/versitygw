@@ -18,24 +18,46 @@ import (
 	"github.com/gofiber/fiber/v2"
 	"github.com/versity/versitygw/auth"
 	"github.com/versity/versitygw/backend"
+	"github.com/versity/versitygw/metrics"
 	"github.com/versity/versitygw/s3api/controllers"
+	"github.com/versity/versitygw/s3api/middlewares"
+	"github.com/versity/versitygw/s3event"
+	"github.com/versity/versitygw/s3log"
 )
 
-type S3ApiRouter struct{}
+type S3ApiRouter struct {
+	WithAdmSrv bool
+}
 
-func (sa *S3ApiRouter) Init(app *fiber.App, be backend.Backend, iam auth.IAMService) {
-	s3ApiController := controllers.New(be)
-	adminController := controllers.AdminController{IAMService: iam}
+func (sa *S3ApiRouter) Init(app *fiber.App, be backend.Backend, iam auth.IAMService, logger s3log.AuditLogger, aLogger s3log.AuditLogger, evs s3event.S3EventSender, mm *metrics.Manager, debug bool, readonly bool) {
+	s3ApiController := controllers.New(be, iam, logger, evs, mm, debug, readonly)
 
-	// TODO: think of better routing system
-	app.Post("/create-user", adminController.CreateUser)
+	if sa.WithAdmSrv {
+		adminController := controllers.NewAdminController(iam, be, aLogger)
 
-	// Admin Delete api
-	app.Delete("/delete-user", adminController.DeleteUser)
+		// CreateUser admin api
+		app.Patch("/create-user", middlewares.IsAdmin(logger), adminController.CreateUser)
+
+		// DeleteUsers admin api
+		app.Patch("/delete-user", middlewares.IsAdmin(logger), adminController.DeleteUser)
+
+		// UpdateUser admin api
+		app.Patch("update-user", middlewares.IsAdmin(logger), adminController.UpdateUser)
+
+		// ListUsers admin api
+		app.Patch("/list-users", middlewares.IsAdmin(logger), adminController.ListUsers)
+
+		// ChangeBucketOwner admin api
+		app.Patch("/change-bucket-owner", middlewares.IsAdmin(logger), adminController.ChangeBucketOwner)
+
+		// ListBucketsAndOwners admin api
+		app.Patch("/list-buckets", middlewares.IsAdmin(logger), adminController.ListBuckets)
+	}
+
 	// ListBuckets action
 	app.Get("/", s3ApiController.ListBuckets)
 
-	// PutBucket action
+	// CreateBucket action
 	// PutBucketAcl action
 	app.Put("/:bucket", s3ApiController.PutBucketActions)
 
@@ -44,6 +66,7 @@ func (sa *S3ApiRouter) Init(app *fiber.App, be backend.Backend, iam auth.IAMServ
 
 	// HeadBucket
 	app.Head("/:bucket", s3ApiController.HeadBucket)
+
 	// GetBucketAcl action
 	// ListMultipartUploads action
 	// ListObjects action
@@ -52,22 +75,34 @@ func (sa *S3ApiRouter) Init(app *fiber.App, be backend.Backend, iam auth.IAMServ
 
 	// HeadObject action
 	app.Head("/:bucket/:key/*", s3ApiController.HeadObject)
+
 	// GetObjectAcl action
 	// GetObject action
 	// ListObjectParts action
+	// GetObjectTagging action
+	// ListParts action
+	// GetObjectAttributes action
 	app.Get("/:bucket/:key/*", s3ApiController.GetActions)
+
 	// DeleteObject action
 	// AbortMultipartUpload action
+	// DeleteObjectTagging action
 	app.Delete("/:bucket/:key/*", s3ApiController.DeleteActions)
+
 	// DeleteObjects action
 	app.Post("/:bucket", s3ApiController.DeleteObjects)
+
 	// CompleteMultipartUpload action
 	// CreateMultipartUpload
 	// RestoreObject action
+	// SelectObjectContent action
 	app.Post("/:bucket/:key/*", s3ApiController.CreateActions)
+
 	// CopyObject action
 	// PutObject action
 	// UploadPart action
 	// UploadPartCopy action
+	// PutObjectTagging action
+	// PutObjectAcl action
 	app.Put("/:bucket/:key/*", s3ApiController.PutActions)
 }

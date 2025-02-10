@@ -17,18 +17,19 @@ package middlewares
 import (
 	"crypto/sha256"
 	"encoding/hex"
-	"os"
-	"strings"
+	"fmt"
+	"io"
+	"net/http"
+	"strconv"
 	"time"
 
-	"github.com/aws/aws-sdk-go-v2/aws"
-	v4 "github.com/aws/aws-sdk-go-v2/aws/signer/v4"
-	"github.com/aws/smithy-go/logging"
 	"github.com/gofiber/fiber/v2"
 	"github.com/versity/versitygw/auth"
+	"github.com/versity/versitygw/metrics"
 	"github.com/versity/versitygw/s3api/controllers"
 	"github.com/versity/versitygw/s3api/utils"
 	"github.com/versity/versitygw/s3err"
+	"github.com/versity/versitygw/s3log"
 )
 
 const (
@@ -40,105 +41,108 @@ type RootUserConfig struct {
 	Secret string
 }
 
-func VerifyV4Signature(root RootUserConfig, iam auth.IAMService, region string, debug bool) fiber.Handler {
+func VerifyV4Signature(root RootUserConfig, iam auth.IAMService, logger s3log.AuditLogger, mm *metrics.Manager, region string, debug bool) fiber.Handler {
 	acct := accounts{root: root, iam: iam}
 
 	return func(ctx *fiber.Ctx) error {
+		// If account is set in context locals, it means it was presigned url case
+		_, ok := ctx.Locals("account").(auth.Account)
+		if ok {
+			return ctx.Next()
+		}
+
+		ctx.Locals("region", region)
+		ctx.Locals("startTime", time.Now())
 		authorization := ctx.Get("Authorization")
 		if authorization == "" {
-			return controllers.SendResponse(ctx, s3err.GetAPIError(s3err.ErrAuthHeaderEmpty))
+			return sendResponse(ctx, s3err.GetAPIError(s3err.ErrAuthHeaderEmpty), logger, mm)
 		}
 
-		// Check the signature version
-		authParts := strings.Split(authorization, " ")
-		if len(authParts) < 4 {
-			return controllers.SendResponse(ctx, s3err.GetAPIError(s3err.ErrMissingFields))
-		}
-		if authParts[0] != "AWS4-HMAC-SHA256" {
-			return controllers.SendResponse(ctx, s3err.GetAPIError(s3err.ErrSignatureVersionNotSupported))
+		authData, err := utils.ParseAuthorization(authorization)
+		if err != nil {
+			return sendResponse(ctx, err, logger, mm)
 		}
 
-		credKv := strings.Split(authParts[1], "=")
-		if len(credKv) != 2 {
-			return controllers.SendResponse(ctx, s3err.GetAPIError(s3err.ErrCredMalformed))
-		}
-		creds := strings.Split(credKv[1], "/")
-		if len(creds) < 4 {
-			return controllers.SendResponse(ctx, s3err.GetAPIError(s3err.ErrCredMalformed))
+		if authData.Algorithm != "AWS4-HMAC-SHA256" {
+			return sendResponse(ctx, s3err.GetAPIError(s3err.ErrSignatureVersionNotSupported), logger, mm)
 		}
 
-		signHdrKv := strings.Split(authParts[2][:len(authParts[2])-1], "=")
-		if len(signHdrKv) != 2 {
-			return controllers.SendResponse(ctx, s3err.GetAPIError(s3err.ErrCredMalformed))
+		if authData.Region != region {
+			return sendResponse(ctx, s3err.APIError{
+				Code:           "SignatureDoesNotMatch",
+				Description:    fmt.Sprintf("Credential should be scoped to a valid Region, not %v", authData.Region),
+				HTTPStatusCode: http.StatusForbidden,
+			}, logger, mm)
 		}
-		signedHdrs := strings.Split(signHdrKv[1], ";")
 
-		account, err := acct.getAccount(creds[0])
+		ctx.Locals("isRoot", authData.Access == root.Access)
+
+		account, err := acct.getAccount(authData.Access)
 		if err == auth.ErrNoSuchUser {
-			return controllers.SendResponse(ctx, s3err.GetAPIError(s3err.ErrInvalidAccessKeyID))
+			return sendResponse(ctx, s3err.GetAPIError(s3err.ErrInvalidAccessKeyID), logger, mm)
 		}
 		if err != nil {
-			return controllers.SendResponse(ctx, err)
+			return sendResponse(ctx, err, logger, mm)
 		}
+		ctx.Locals("account", account)
 
 		// Check X-Amz-Date header
 		date := ctx.Get("X-Amz-Date")
 		if date == "" {
-			return controllers.SendResponse(ctx, s3err.GetAPIError(s3err.ErrMissingDateHeader))
+			return sendResponse(ctx, s3err.GetAPIError(s3err.ErrMissingDateHeader), logger, mm)
 		}
 
 		// Parse the date and check the date validity
 		tdate, err := time.Parse(iso8601Format, date)
 		if err != nil {
-			return controllers.SendResponse(ctx, s3err.GetAPIError(s3err.ErrMalformedDate))
+			return sendResponse(ctx, s3err.GetAPIError(s3err.ErrMalformedDate), logger, mm)
 		}
 
-		// Calculate the hash of the request payload
-		hashedPayload := sha256.Sum256(ctx.Body())
-		hexPayload := hex.EncodeToString(hashedPayload[:])
-
-		hashPayloadHeader := ctx.Get("X-Amz-Content-Sha256")
-
-		// Compare the calculated hash with the hash provided
-		if hashPayloadHeader != hexPayload {
-			return controllers.SendResponse(ctx, s3err.GetAPIError(s3err.ErrContentSHA256Mismatch))
+		if date[:8] != authData.Date {
+			return sendResponse(ctx, s3err.GetAPIError(s3err.ErrSignatureDateDoesNotMatch), logger, mm)
 		}
 
-		// Create a new http request instance from fasthttp request
-		req, err := utils.CreateHttpRequestFromCtx(ctx, signedHdrs)
+		// Validate the dates difference
+		err = utils.ValidateDate(tdate)
 		if err != nil {
-			return controllers.SendResponse(ctx, s3err.GetAPIError(s3err.ErrInternalError))
+			return sendResponse(ctx, err, logger, mm)
 		}
 
-		signer := v4.NewSigner()
+		if utils.IsBigDataAction(ctx) {
+			// for streaming PUT actions, authorization is deferred
+			// until end of stream due to need to get length and
+			// checksum of the stream to validate authorization
+			wrapBodyReader(ctx, func(r io.Reader) io.Reader {
+				return utils.NewAuthReader(ctx, r, authData, account.Secret, debug)
+			})
+			return ctx.Next()
+		}
 
-		signErr := signer.SignHTTP(req.Context(), aws.Credentials{
-			AccessKeyID:     creds[0],
-			SecretAccessKey: account.Secret,
-		}, req, hexPayload, creds[3], region, tdate, func(options *v4.SignerOptions) {
-			if debug {
-				options.LogSigning = true
-				options.Logger = logging.NewStandardLogger(os.Stderr)
+		hashPayload := ctx.Get("X-Amz-Content-Sha256")
+		if !utils.IsSpecialPayload(hashPayload) {
+			// Calculate the hash of the request payload
+			hashedPayload := sha256.Sum256(ctx.Body())
+			hexPayload := hex.EncodeToString(hashedPayload[:])
+
+			// Compare the calculated hash with the hash provided
+			if hashPayload != hexPayload {
+				return sendResponse(ctx, s3err.GetAPIError(s3err.ErrContentSHA256Mismatch), logger, mm)
 			}
-		})
-		if signErr != nil {
-			return controllers.SendResponse(ctx, s3err.GetAPIError(s3err.ErrInternalError))
 		}
 
-		parts := strings.Split(req.Header.Get("Authorization"), " ")
-		if len(parts) < 4 {
-			return controllers.SendResponse(ctx, s3err.GetAPIError(s3err.ErrMissingFields))
-		}
-		calculatedSign := strings.Split(parts[3], "=")[1]
-		expectedSign := strings.Split(authParts[3], "=")[1]
-
-		if expectedSign != calculatedSign {
-			return controllers.SendResponse(ctx, s3err.GetAPIError(s3err.ErrSignatureDoesNotMatch))
+		var contentLength int64
+		contentLengthStr := ctx.Get("Content-Length")
+		if contentLengthStr != "" {
+			contentLength, err = strconv.ParseInt(contentLengthStr, 10, 64)
+			if err != nil {
+				return sendResponse(ctx, s3err.GetAPIError(s3err.ErrInvalidRequest), logger, mm)
+			}
 		}
 
-		ctx.Locals("role", account.Role)
-		ctx.Locals("access", creds[0])
-		ctx.Locals("isRoot", creds[0] == root.Access)
+		err = utils.CheckValidSignature(ctx, authData, account.Secret, hashPayload, tdate, contentLength, debug)
+		if err != nil {
+			return sendResponse(ctx, err, logger, mm)
+		}
 
 		return ctx.Next()
 	}
@@ -152,10 +156,15 @@ type accounts struct {
 func (a accounts) getAccount(access string) (auth.Account, error) {
 	if access == a.root.Access {
 		return auth.Account{
+			Access: a.root.Access,
 			Secret: a.root.Secret,
 			Role:   "admin",
 		}, nil
 	}
 
 	return a.iam.GetUserAccount(access)
+}
+
+func sendResponse(ctx *fiber.Ctx, err error, logger s3log.AuditLogger, mm *metrics.Manager) error {
+	return controllers.SendResponse(ctx, err, &controllers.MetaOpts{Logger: logger, MetricsMng: mm})
 }

@@ -15,34 +15,170 @@
 package auth
 
 import (
+	"context"
 	"encoding/json"
+	"encoding/xml"
+	"errors"
 	"fmt"
-	"os"
 	"strings"
 
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 	"github.com/aws/aws-sdk-go-v2/service/s3/types"
+	"github.com/versity/versitygw/backend"
 	"github.com/versity/versitygw/s3err"
 )
 
 type ACL struct {
-	ACL      types.BucketCannedACL
 	Owner    string
 	Grantees []Grantee
 }
 
 type Grantee struct {
-	Permission types.Permission
+	Permission Permission
 	Access     string
+	Type       types.Type
 }
 
 type GetBucketAclOutput struct {
+	XMLName           xml.Name `xml:"http://s3.amazonaws.com/doc/2006-03-01/ AccessControlPolicy"`
 	Owner             *types.Owner
 	AccessControlList AccessControlList
 }
 
+type PutBucketAclInput struct {
+	Bucket              *string
+	ACL                 types.BucketCannedACL
+	AccessControlPolicy *AccessControlPolicy
+	GrantFullControl    *string
+	GrantRead           *string
+	GrantReadACP        *string
+	GrantWrite          *string
+	GrantWriteACP       *string
+}
+
+type AccessControlPolicy struct {
+	AccessControlList AccessControlList `xml:"AccessControlList"`
+	Owner             *types.Owner
+}
+
+func (acp *AccessControlPolicy) Validate() error {
+	if !acp.AccessControlList.isValid() {
+		return s3err.GetAPIError(s3err.ErrMalformedACL)
+	}
+
+	// The Owner can't be nil
+	if acp.Owner == nil {
+		return s3err.GetAPIError(s3err.ErrMalformedACL)
+	}
+
+	// The Owner ID can't be empty
+	if acp.Owner.ID == nil || *acp.Owner.ID == "" {
+		return s3err.GetAPIError(s3err.ErrMalformedACL)
+	}
+
+	return nil
+}
+
 type AccessControlList struct {
-	Grants []types.Grant
+	Grants []Grant `xml:"Grant"`
+}
+
+// Validates the AccessControlList
+func (acl *AccessControlList) isValid() bool {
+	for _, el := range acl.Grants {
+		if !el.isValid() {
+			return false
+		}
+	}
+
+	return true
+}
+
+type Permission string
+
+const (
+	PermissionFullControl Permission = "FULL_CONTROL"
+	PermissionWrite       Permission = "WRITE"
+	PermissionWriteAcp    Permission = "WRITE_ACP"
+	PermissionRead        Permission = "READ"
+	PermissionReadAcp     Permission = "READ_ACP"
+)
+
+// Check if the permission is valid
+func (p Permission) isValid() bool {
+	return p == PermissionFullControl ||
+		p == PermissionRead ||
+		p == PermissionReadAcp ||
+		p == PermissionWrite ||
+		p == PermissionWriteAcp
+}
+
+type Grant struct {
+	Grantee    *Grt       `xml:"Grantee"`
+	Permission Permission `xml:"Permission"`
+}
+
+// Checks if Grant is valid
+func (g *Grant) isValid() bool {
+	return g.Permission.isValid() && g.Grantee.isValid()
+}
+
+type Grt struct {
+	XMLNS string     `xml:"xmlns:xsi,attr"`
+	Type  types.Type `xml:"xsi:type,attr"`
+	ID    string     `xml:"ID"`
+}
+
+// Custom Unmarshalling for Grt to parse xsi:type properly
+func (g *Grt) UnmarshalXML(d *xml.Decoder, start xml.StartElement) error {
+	// Iterate through the XML tokens to process the attributes
+	for _, attr := range start.Attr {
+		// Check if the attribute is xsi:type and belongs to the xsi namespace
+		if attr.Name.Space == "http://www.w3.org/2001/XMLSchema-instance" && attr.Name.Local == "type" {
+			g.Type = types.Type(attr.Value)
+		}
+		// Handle xmlns:xsi
+		if attr.Name.Local == "xmlns:xsi" {
+			g.XMLNS = attr.Value
+		}
+	}
+
+	// Decode the inner XML elements like ID
+	for {
+		t, err := d.Token()
+		if err != nil {
+			return err
+		}
+
+		switch se := t.(type) {
+		case xml.StartElement:
+			if se.Name.Local == "ID" {
+				if err := d.DecodeElement(&g.ID, &se); err != nil {
+					return err
+				}
+			}
+		case xml.EndElement:
+			if se.Name.Local == start.Name.Local {
+				return nil
+			}
+		}
+	}
+}
+
+// Validates Grt
+func (g *Grt) isValid() bool {
+	// Validate the Type
+	// Only these 2 types are supported in the gateway
+	if g.Type != types.TypeCanonicalUser && g.Type != types.TypeGroup {
+		return false
+	}
+
+	// The ID prop shouldn't be empty
+	if g.ID == "" {
+		return false
+	}
+
+	return true
 }
 
 func ParseACL(data []byte) (ACL, error) {
@@ -63,11 +199,18 @@ func ParseACLOutput(data []byte) (GetBucketAclOutput, error) {
 		return GetBucketAclOutput{}, fmt.Errorf("parse acl: %w", err)
 	}
 
-	grants := []types.Grant{}
+	grants := []Grant{}
 
 	for _, elem := range acl.Grantees {
 		acs := elem.Access
-		grants = append(grants, types.Grant{Grantee: &types.Grantee{ID: &acs}, Permission: elem.Permission})
+		grants = append(grants, Grant{
+			Grantee: &Grt{
+				XMLNS: "http://www.w3.org/2001/XMLSchema-instance",
+				ID:    acs,
+				Type:  elem.Type,
+			},
+			Permission: elem.Permission,
+		})
 	}
 
 	return GetBucketAclOutput{
@@ -80,81 +223,154 @@ func ParseACLOutput(data []byte) (GetBucketAclOutput, error) {
 	}, nil
 }
 
-func UpdateACL(input *s3.PutBucketAclInput, acl ACL, iam IAMService) error {
-	if acl.Owner != *input.AccessControlPolicy.Owner.ID {
-		return s3err.GetAPIError(s3err.ErrAccessDenied)
+func UpdateACL(input *PutBucketAclInput, acl ACL, iam IAMService, isAdmin bool) ([]byte, error) {
+	if input == nil {
+		return nil, s3err.GetAPIError(s3err.ErrInvalidRequest)
+	}
+
+	defaultGrantees := []Grantee{
+		{
+			Permission: PermissionFullControl,
+			Access:     acl.Owner,
+			Type:       types.TypeCanonicalUser,
+		},
 	}
 
 	// if the ACL is specified, set the ACL, else replace the grantees
 	if input.ACL != "" {
-		acl.ACL = input.ACL
-		acl.Grantees = []Grantee{}
-		return nil
-	}
+		switch input.ACL {
+		case types.BucketCannedACLPublicRead:
+			defaultGrantees = append(defaultGrantees, Grantee{
+				Permission: PermissionRead,
+				Access:     "all-users",
+				Type:       types.TypeGroup,
+			})
+		case types.BucketCannedACLPublicReadWrite:
+			defaultGrantees = append(defaultGrantees, []Grantee{
+				{
+					Permission: PermissionRead,
+					Access:     "all-users",
+					Type:       types.TypeGroup,
+				},
+				{
+					Permission: PermissionWrite,
+					Access:     "all-users",
+					Type:       types.TypeGroup,
+				},
+			}...)
+		}
+	} else {
+		accs := []string{}
 
-	grantees := []Grantee{}
+		if input.GrantRead != nil || input.GrantReadACP != nil || input.GrantFullControl != nil || input.GrantWrite != nil || input.GrantWriteACP != nil {
+			fullControlList, readList, readACPList, writeList, writeACPList := []string{}, []string{}, []string{}, []string{}, []string{}
 
-	fullControlList, readList, readACPList, writeList, writeACPList := []string{}, []string{}, []string{}, []string{}, []string{}
+			if input.GrantFullControl != nil && *input.GrantFullControl != "" {
+				fullControlList = splitUnique(*input.GrantFullControl, ",")
+				for _, str := range fullControlList {
+					defaultGrantees = append(defaultGrantees, Grantee{
+						Access:     str,
+						Permission: PermissionFullControl,
+						Type:       types.TypeCanonicalUser,
+					})
+				}
+			}
+			if input.GrantRead != nil && *input.GrantRead != "" {
+				readList = splitUnique(*input.GrantRead, ",")
+				for _, str := range readList {
+					defaultGrantees = append(defaultGrantees, Grantee{
+						Access:     str,
+						Permission: PermissionRead,
+						Type:       types.TypeCanonicalUser,
+					})
+				}
+			}
+			if input.GrantReadACP != nil && *input.GrantReadACP != "" {
+				readACPList = splitUnique(*input.GrantReadACP, ",")
+				for _, str := range readACPList {
+					defaultGrantees = append(defaultGrantees, Grantee{
+						Access:     str,
+						Permission: PermissionReadAcp,
+						Type:       types.TypeCanonicalUser,
+					})
+				}
+			}
+			if input.GrantWrite != nil && *input.GrantWrite != "" {
+				writeList = splitUnique(*input.GrantWrite, ",")
+				for _, str := range writeList {
+					defaultGrantees = append(defaultGrantees, Grantee{
+						Access:     str,
+						Permission: PermissionWrite,
+						Type:       types.TypeCanonicalUser,
+					})
+				}
+			}
+			if input.GrantWriteACP != nil && *input.GrantWriteACP != "" {
+				writeACPList = splitUnique(*input.GrantWriteACP, ",")
+				for _, str := range writeACPList {
+					defaultGrantees = append(defaultGrantees, Grantee{
+						Access:     str,
+						Permission: PermissionWriteAcp,
+						Type:       types.TypeCanonicalUser,
+					})
+				}
+			}
 
-	if *input.GrantFullControl != "" {
-		fullControlList = splitUnique(*input.GrantFullControl, ",")
-		fmt.Println(fullControlList)
-		for _, str := range fullControlList {
-			grantees = append(grantees, Grantee{Access: str, Permission: "FULL_CONTROL"})
+			accs = append(append(append(append(fullControlList, readList...), writeACPList...), readACPList...), writeList...)
+		} else {
+			cache := make(map[string]bool)
+			for _, grt := range input.AccessControlPolicy.AccessControlList.Grants {
+				if grt.Grantee == nil || grt.Grantee.ID == "" || grt.Permission == "" {
+					return nil, s3err.GetAPIError(s3err.ErrInvalidRequest)
+				}
+
+				access := grt.Grantee.ID
+				defaultGrantees = append(defaultGrantees, Grantee{
+					Access:     access,
+					Permission: grt.Permission,
+					Type:       types.TypeCanonicalUser,
+				})
+				if _, ok := cache[access]; !ok {
+					cache[access] = true
+					accs = append(accs, access)
+				}
+			}
+		}
+
+		// Check if the specified accounts exist
+		accList, err := CheckIfAccountsExist(accs, iam)
+		if err != nil {
+			return nil, err
+		}
+		if len(accList) > 0 {
+			return nil, fmt.Errorf("accounts does not exist: %s", strings.Join(accList, ", "))
 		}
 	}
-	if *input.GrantRead != "" {
-		readList = splitUnique(*input.GrantRead, ",")
-		for _, str := range readList {
-			grantees = append(grantees, Grantee{Access: str, Permission: "READ"})
-		}
-	}
-	if *input.GrantReadACP != "" {
-		readACPList = splitUnique(*input.GrantReadACP, ",")
-		for _, str := range readACPList {
-			grantees = append(grantees, Grantee{Access: str, Permission: "READ_ACP"})
-		}
-	}
-	if *input.GrantWrite != "" {
-		writeList = splitUnique(*input.GrantWrite, ",")
-		for _, str := range writeList {
-			grantees = append(grantees, Grantee{Access: str, Permission: "WRITE"})
-		}
-	}
-	if *input.GrantWriteACP != "" {
-		writeACPList = splitUnique(*input.GrantWriteACP, ",")
-		for _, str := range writeACPList {
-			grantees = append(grantees, Grantee{Access: str, Permission: "WRITE_ACP"})
-		}
-	}
 
-	accs := append(append(append(append(fullControlList, readList...), writeACPList...), readACPList...), writeList...)
+	acl.Grantees = defaultGrantees
 
-	// Check if the specified accounts exist
-	accList, err := checkIfAccountsExist(accs, iam)
+	result, err := json.Marshal(acl)
 	if err != nil {
-		return err
-	}
-	if len(accList) > 0 {
-		return fmt.Errorf("accounts does not exist: %s", strings.Join(accList, ", "))
+		return nil, err
 	}
 
-	acl.Grantees = grantees
-	acl.ACL = ""
-
-	return nil
+	return result, nil
 }
 
-func checkIfAccountsExist(accs []string, iam IAMService) ([]string, error) {
+func CheckIfAccountsExist(accs []string, iam IAMService) ([]string, error) {
 	result := []string{}
 
 	for _, acc := range accs {
 		_, err := iam.GetUserAccount(acc)
-		if err != nil && err != ErrNoSuchUser {
+		if err != nil {
+			if err == ErrNoSuchUser {
+				result = append(result, acc)
+				continue
+			}
+			if errors.Is(err, s3err.GetAPIError(s3err.ErrAdminMethodNotSupported)) {
+				return nil, err
+			}
 			return nil, fmt.Errorf("check user account: %w", err)
-		}
-		if err == nil {
-			result = append(result, acc)
 		}
 	}
 	return result, nil
@@ -175,68 +391,151 @@ func splitUnique(s, divider string) []string {
 	return result
 }
 
-func VerifyACL(acl ACL, bucket, access string, permission types.Permission, isRoot bool) error {
-	if isRoot {
-		return nil
+func verifyACL(acl ACL, access string, permission Permission) error {
+	grantee := Grantee{
+		Access:     access,
+		Permission: permission,
+		Type:       types.TypeCanonicalUser,
+	}
+	granteeFullCtrl := Grantee{
+		Access:     access,
+		Permission: PermissionFullControl,
+		Type:       types.TypeCanonicalUser,
+	}
+	granteeAllUsers := Grantee{
+		Access:     "all-users",
+		Permission: permission,
+		Type:       types.TypeGroup,
 	}
 
-	if acl.Owner == access {
-		return nil
+	isFound := false
+
+	for _, grt := range acl.Grantees {
+		if grt == grantee || grt == granteeFullCtrl || grt == granteeAllUsers {
+			isFound = true
+			break
+		}
 	}
 
-	if acl.ACL != "" {
-		if (permission == "READ" || permission == "READ_ACP") && (acl.ACL != "public-read" && acl.ACL != "public-read-write") {
-			return s3err.GetAPIError(s3err.ErrAccessDenied)
-		}
-		if (permission == "WRITE" || permission == "WRITE_ACP") && acl.ACL != "public-read-write" {
-			return s3err.GetAPIError(s3err.ErrAccessDenied)
-		}
-
+	if isFound {
 		return nil
-	} else {
-		grantee := Grantee{Access: access, Permission: permission}
-		granteeFullCtrl := Grantee{Access: access, Permission: "FULL_CONTROL"}
-
-		isFound := false
-
-		for _, grt := range acl.Grantees {
-			if grt == grantee || grt == granteeFullCtrl {
-				isFound = true
-				break
-			}
-		}
-
-		if isFound {
-			return nil
-		}
 	}
 
 	return s3err.GetAPIError(s3err.ErrAccessDenied)
 }
 
-func IsAdmin(access string, isRoot bool) error {
-	var data IAMConfig
-
+func MayCreateBucket(acct Account, isRoot bool) error {
 	if isRoot {
 		return nil
 	}
 
-	file, err := os.ReadFile("users.json")
-	if err != nil {
-		return fmt.Errorf("unable to read config file: %w", err)
+	if acct.Role == RoleUser {
+		return s3err.GetAPIError(s3err.ErrAccessDenied)
 	}
 
-	if err := json.Unmarshal(file, &data); err != nil {
+	return nil
+}
+
+func IsAdminOrOwner(acct Account, isRoot bool, acl ACL) error {
+	// Owner check
+	if acct.Access == acl.Owner {
+		return nil
+	}
+
+	// Root user has access over almost everything
+	if isRoot {
+		return nil
+	}
+
+	// Admin user case
+	if acct.Role == RoleAdmin {
+		return nil
+	}
+
+	// Return access denied in all other cases
+	return s3err.GetAPIError(s3err.ErrAccessDenied)
+}
+
+type AccessOptions struct {
+	Acl           ACL
+	AclPermission Permission
+	IsRoot        bool
+	Acc           Account
+	Bucket        string
+	Object        string
+	Action        Action
+	Readonly      bool
+}
+
+func VerifyAccess(ctx context.Context, be backend.Backend, opts AccessOptions) error {
+	if opts.Readonly {
+		if opts.AclPermission == PermissionWrite || opts.AclPermission == PermissionWriteAcp {
+			return s3err.GetAPIError(s3err.ErrAccessDenied)
+		}
+	}
+	if opts.IsRoot {
+		return nil
+	}
+	if opts.Acc.Role == RoleAdmin {
+		return nil
+	}
+
+	policy, policyErr := be.GetBucketPolicy(ctx, opts.Bucket)
+	if policyErr != nil {
+		if !errors.Is(policyErr, s3err.GetAPIError(s3err.ErrNoSuchBucketPolicy)) {
+			return policyErr
+		}
+	} else {
+		return VerifyBucketPolicy(policy, opts.Acc.Access, opts.Bucket, opts.Object, opts.Action)
+	}
+
+	if err := verifyACL(opts.Acl, opts.Acc.Access, opts.AclPermission); err != nil {
 		return err
 	}
 
-	acc, ok := data.AccessAccounts[access]
-	if !ok {
-		return fmt.Errorf("user does not exist")
-	}
+	return nil
+}
 
-	if acc.Role == "admin" {
+func VerifyObjectCopyAccess(ctx context.Context, be backend.Backend, copySource string, opts AccessOptions) error {
+	if opts.IsRoot {
 		return nil
 	}
-	return fmt.Errorf("only admin users have access to this resource")
+	if opts.Acc.Role == RoleAdmin {
+		return nil
+	}
+
+	// Verify destination bucket access
+	if err := VerifyAccess(ctx, be, opts); err != nil {
+		return err
+	}
+	// Verify source bucket access
+	srcBucket, srcObject, found := strings.Cut(copySource, "/")
+	if !found {
+		return s3err.GetAPIError(s3err.ErrInvalidCopySource)
+	}
+
+	// Get source bucket ACL
+	srcBucketACLBytes, err := be.GetBucketAcl(ctx, &s3.GetBucketAclInput{Bucket: &srcBucket})
+	if err != nil {
+		return err
+	}
+
+	var srcBucketAcl ACL
+	if err := json.Unmarshal(srcBucketACLBytes, &srcBucketAcl); err != nil {
+		return err
+	}
+
+	if err := VerifyAccess(ctx, be, AccessOptions{
+		Acl:           srcBucketAcl,
+		AclPermission: PermissionRead,
+		IsRoot:        opts.IsRoot,
+		Acc:           opts.Acc,
+		Bucket:        srcBucket,
+		Object:        srcObject,
+		Action:        GetObjectAction,
+	}); err != nil {
+		return err
+	}
+
+	return nil
 }

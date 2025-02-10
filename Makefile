@@ -18,6 +18,10 @@ GOBUILD=$(GOCMD) build
 GOCLEAN=$(GOCMD) clean
 GOTEST=$(GOCMD) test
 
+# docker-compose
+DCCMD=docker-compose
+DOCKERCOMPOSE=$(DCCMD) -f tests/docker-compose.yml --env-file .env.dev --project-directory .
+
 BIN=versitygw
 
 VERSION := $(shell if test -e VERSION; then cat VERSION; else git describe --abbrev=0 --tags HEAD; fi)
@@ -59,18 +63,31 @@ cleanall: clean
 	rm -f $(BIN)
 	rm -f versitygw-*.tar
 	rm -f versitygw-*.tar.gz
-	rm -f versitygw.spec
-
-%.spec: %.spec.in
-	sed -e 's/@@VERSION@@/$(VERSION)/g' < $< > $@+
-	mv $@+ $@
 
 TARFILE = $(BIN)-$(VERSION).tar
 
-dist: $(BIN).spec
+dist:
 	echo $(VERSION) >VERSION
 	git archive --format=tar --prefix $(BIN)-$(VERSION)/ HEAD > $(TARFILE)
-	@ tar rf $(TARFILE) --transform="s@\(.*\)@$(BIN)-$(VERSION)/\1@" $(BIN).spec VERSION
 	rm -f VERSION
-	rm -f $(BIN).spec
 	gzip -f $(TARFILE)
+
+# Creates and runs S3 gateway instance in a docker container
+.PHONY: up-posix
+up-posix:
+	$(DOCKERCOMPOSE) up posix
+
+# Creates and runs S3 gateway proxy instance in a docker container
+.PHONY: up-proxy
+up-proxy:
+	$(DOCKERCOMPOSE) up proxy
+
+# Creates and runs S3 gateway to azurite instance in a docker container
+.PHONY: up-azurite
+up-azurite:
+	$(DOCKERCOMPOSE) up azurite azuritegw
+
+# Creates and runs both S3 gateway and proxy server instances in docker containers
+.PHONY: up-app
+up-app:
+	$(DOCKERCOMPOSE) up

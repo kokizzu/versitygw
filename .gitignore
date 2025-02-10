@@ -25,6 +25,9 @@ go.work
 # ignore IntelliJ directories
 .idea
 
+# ignore VS code directories
+.vscode
+
 # auto generated VERSION file
 VERSION
 
@@ -34,3 +37,33 @@ VERSION
 *.tar.gz
 **/rand.data
 /profile.txt
+
+dist/
+
+# secrets file for local github-actions testing
+tests/.secrets*
+
+# IAM users files often created in testing
+users.json
+users.json.backup
+
+# env files for testing
+**/.env*
+**/!.env.default
+
+# s3cmd config files (testing)
+tests/s3cfg.local*
+tests/!s3cfg.local.default
+
+# keys
+*.pem
+
+# patches
+*.patch
+
+# grafana's local database (kept on filesystem for survival between instantiations)
+metrics-exploration/grafana_data/**
+
+# bats tools
+/tests/bats-assert
+/tests/bats-support

@@ -1,26 +1,44 @@
+// Copyright 2023 Versity Software
+// This file is licensed under the Apache License, Version 2.0
+// (the "License"); you may not use this file except in compliance
+// with the License.  You may obtain a copy of the License at
+//
+//   http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing,
+// software distributed under the License is distributed on an
+// "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+// KIND, either express or implied.  See the License for the
+// specific language governing permissions and limitations
+// under the License.
+
 package main
 
 import (
 	"fmt"
 
 	"github.com/urfave/cli/v2"
-	"github.com/versity/versitygw/integration"
+	"github.com/versity/versitygw/tests/integration"
 )
 
 var (
-	awsID           string
-	awsSecret       string
-	endpoint        string
-	prefix          string
-	dstBucket       string
-	partSize        int64
-	objSize         int64
-	concurrency     int
-	files           int
-	upload          bool
-	download        bool
-	pathStyle       bool
-	checksumDisable bool
+	awsID             string
+	awsSecret         string
+	endpoint          string
+	prefix            string
+	dstBucket         string
+	partSize          int64
+	objSize           int64
+	concurrency       int
+	files             int
+	totalReqs         int
+	upload            bool
+	download          bool
+	pathStyle         bool
+	checksumDisable   bool
+	versioningEnabled bool
+	azureTests        bool
+	tlsStatus         bool
 )
 
 func testCommand() *cli.Command {
@@ -62,114 +80,59 @@ func initTestFlags() []cli.Flag {
 			Aliases:     []string{"d"},
 			Destination: &debug,
 		},
+		&cli.BoolFlag{
+			Name:        "allow-insecure",
+			Usage:       "skip tls verification",
+			Aliases:     []string{"ai"},
+			Destination: &tlsStatus,
+		},
 	}
 }
 
 func initTestCommands() []*cli.Command {
-	return []*cli.Command{
-		{
-			Name:  "make-bucket",
-			Usage: "Test bucket creation.",
-			Description: `Calls s3 gateway create-bucket action to create a new bucket,
-		then calls delete-bucket action to delete the bucket.`,
-			Action: getAction(integration.TestMakeBucket),
-		},
-		{
-			Name:  "put-get-object",
-			Usage: "Test put & get object.",
-			Description: `Creates a bucket with s3 gateway action, puts an object in it,
-			gets the object from the bucket, deletes both the object and bucket.`,
-			Action: getAction(integration.TestPutGetObject),
-		},
-		{
-			Name:  "put-get-mp-object",
-			Usage: "Test put & get multipart object.",
-			Description: `Creates a bucket with s3 gateway action, puts an object in it with multipart upload,
-			gets the object from the bucket, deletes both the object and bucket.`,
-			Action: getAction(integration.TestPutGetMPObject),
-		},
-		{
-			Name:  "put-dir-object",
-			Usage: "Test put directory object.",
-			Description: `Creates a bucket with s3 gateway action, puts a directory object in it,
-			lists the bucket's objects, deletes both the objects and bucket.`,
-			Action: getAction(integration.TestPutDirObject),
-		},
-		{
-			Name:  "list-objects",
-			Usage: "Test list-objects action.",
-			Description: `Creates a bucket with s3 gateway action, puts 2 directory objects in it,
-			lists the bucket's objects, deletes both the objects and bucket.`,
-			Action: getAction(integration.TestListObject),
-		},
-		{
-			Name:  "abort-mp",
-			Usage: "Tests abort-multipart-upload action.",
-			Description: `Creates a bucket with s3 gateway action, creates a multipart upload,
-			lists the multipart upload, aborts the multipart upload, lists the multipart upload again,
-			deletes both the objects and bucket.`,
-			Action: getAction(integration.TestListAbortMultiPartObject),
-		},
-		{
-			Name:  "list-parts",
-			Usage: "Tests list-parts action.",
-			Description: `Creates a bucket with s3 gateway action, creates a multipart upload,
-			lists the upload parts, deletes both the objects and bucket.`,
-			Action: getAction(integration.TestListMultiParts),
-		},
-		{
-			Name:  "incorrect-mp",
-			Usage: "Tests incorrect multipart case.",
-			Description: `Creates a bucket with s3 gateway action, creates a multipart upload,
-			uploads different parts, completes the multipart upload with incorrect part numbers,
-			calls the head-object action, compares the content length, removes both the object and bucket`,
-			Action: getAction(integration.TestIncorrectMultiParts),
-		},
-		{
-			Name:  "incomplete-mp",
-			Usage: "Tests incomplete multi parts.",
-			Description: `Creates a bucket with s3 gateway action, creates a multipart upload,
-			upload a part, lists the parts, checks if the uploaded part is in the list, 
-			removes both the object and the bucket`,
-			Action: getAction(integration.TestIncompleteMultiParts),
-		},
-		{
-			Name:  "incomplete-put-object",
-			Usage: "Tests incomplete put objects case.",
-			Description: `Creates a bucket with s3 gateway action, puts an object in it,
-			gets the object with head-object action, expects the object to be got, 
-			removes both the object and bucket`,
-			Action: getAction(integration.TestIncompletePutObject),
-		},
-		{
-			Name:  "get-range",
-			Usage: "Tests get object by range.",
-			Description: `Creates a bucket with s3 gateway action, puts an object in it,
-			gets the object by specifying the object range, compares the range with the original one,
-			removes both the object and the bucket`,
-			Action: getAction(integration.TestRangeGet),
-		},
-		{
-			Name:  "invalid-mp",
-			Usage: "Tests invalid multi part case.",
-			Description: `Creates a bucket with s3 gateway action, creates a multi part upload,
-			uploads an invalid part, gets the object with head-object action, expects to get error,
-			removes both the object and bucket`,
-			Action: getAction(integration.TestInvalidMultiParts),
-		},
-		{
-			Name:  "object-tag-actions",
-			Usage: "Tests get/put/delete object tag actions.",
-			Description: `Creates a bucket with s3 gateway action, puts an object in it,
-			puts some tags for the object, gets the tags, compares the results, removes the tags,
-			gets the tags again, checks it to be empty, then removes both the object and bucket`,
-			Action: getAction(integration.TestPutGetRemoveTags),
-		},
+	return append([]*cli.Command{
 		{
 			Name:        "full-flow",
 			Usage:       "Tests the full flow of gateway.",
 			Description: `Runs all the available tests to test the full flow of the gateway.`,
 			Action:      getAction(integration.TestFullFlow),
+			Flags: []cli.Flag{
+				&cli.BoolFlag{
+					Name:        "versioning-enabled",
+					Usage:       "Test the bucket object versioning, if the versioning is enabled",
+					Destination: &versioningEnabled,
+					Aliases:     []string{"vs"},
+				},
+				&cli.BoolFlag{
+					Name:        "azure-test-mode",
+					Usage:       "Skips tests that are not supported by Azure",
+					Destination: &azureTests,
+					Aliases:     []string{"azure"},
+				},
+			},
+		},
+		{
+			Name:   "posix",
+			Usage:  "Tests posix specific features",
+			Action: getAction(integration.TestPosix),
+			Flags: []cli.Flag{
+				&cli.BoolFlag{
+					Name:        "versioning-enabled",
+					Usage:       "Test posix when versioning is enabled",
+					Destination: &versioningEnabled,
+					Aliases:     []string{"vs"},
+				},
+			},
+		},
+		{
+			Name:   "iam",
+			Usage:  "Tests iam service",
+			Action: getAction(integration.TestIAM),
+		},
+		{
+			Name:   "access-control",
+			Usage:  "Tests gateway access control with bucket ACLs and Policies",
+			Action: getAction(integration.TestAccessControl),
 		},
 		{
 			Name:  "bench",
@@ -255,6 +218,7 @@ func initTestCommands() []*cli.Command {
 					integration.WithEndpoint(endpoint),
 					integration.WithConcurrency(concurrency),
 					integration.WithPartSize(partSize),
+					integration.WithTLSStatus(tlsStatus),
 				}
 				if debug {
 					opts = append(opts, integration.WithDebug())
@@ -268,10 +232,68 @@ func initTestCommands() []*cli.Command {
 
 				s3conf := integration.NewS3Conf(opts...)
 
-				return integration.TestPerformance(s3conf, upload, download, files, objSize, dstBucket, prefix)
+				if upload {
+					return integration.TestUpload(s3conf, files, objSize, dstBucket, prefix)
+				} else {
+					return integration.TestDownload(s3conf, files, objSize, dstBucket, prefix)
+				}
 			},
 		},
-	}
+		{
+			Name:        "throughput",
+			Usage:       "Runs throughput performance test on the gateway",
+			Description: `Calls HeadBucket action the number of times and concurrency level specified with flags by measuring gateway throughput.`,
+			Flags: []cli.Flag{
+				&cli.IntFlag{
+					Name:        "reqs",
+					Usage:       "Total number of requests to send.",
+					Value:       1000,
+					Destination: &totalReqs,
+				},
+				&cli.StringFlag{
+					Name:        "bucket",
+					Usage:       "Destination bucket name to make the requests",
+					Destination: &dstBucket,
+				},
+				&cli.IntFlag{
+					Name:        "concurrency",
+					Usage:       "threads per request",
+					Value:       1,
+					Destination: &concurrency,
+				},
+				&cli.BoolFlag{
+					Name:        "checksumDis",
+					Usage:       "Disable server checksum",
+					Value:       false,
+					Destination: &checksumDisable,
+				},
+			},
+			Action: func(ctx *cli.Context) error {
+				if dstBucket == "" {
+					return fmt.Errorf("must specify the destination bucket")
+				}
+
+				opts := []integration.Option{
+					integration.WithAccess(awsID),
+					integration.WithSecret(awsSecret),
+					integration.WithRegion(region),
+					integration.WithEndpoint(endpoint),
+					integration.WithConcurrency(concurrency),
+					integration.WithTLSStatus(tlsStatus),
+				}
+				if debug {
+					opts = append(opts, integration.WithDebug())
+				}
+				if checksumDisable {
+					opts = append(opts, integration.WithDisableChecksum())
+				}
+
+				s3conf := integration.NewS3Conf(opts...)
+
+				return integration.TestReqPerSec(s3conf, totalReqs, dstBucket)
+			},
+		},
+	}, extractIntTests()...)
 }
 
 type testFunc func(*integration.S3Conf)
@@ -283,9 +305,16 @@ func getAction(tf testFunc) func(*cli.Context) error {
 			integration.WithSecret(awsSecret),
 			integration.WithRegion(region),
 			integration.WithEndpoint(endpoint),
+			integration.WithTLSStatus(tlsStatus),
 		}
 		if debug {
 			opts = append(opts, integration.WithDebug())
+		}
+		if versioningEnabled {
+			opts = append(opts, integration.WithVersioningEnabled())
+		}
+		if azureTests {
+			opts = append(opts, integration.WithAzureMode())
 		}
 
 		s := integration.NewS3Conf(opts...)
@@ -298,4 +327,44 @@ func getAction(tf testFunc) func(*cli.Context) error {
 		}
 		return nil
 	}
+}
+
+func extractIntTests() (commands []*cli.Command) {
+	tests := integration.GetIntTests()
+	for key, val := range tests {
+		k := key
+		testFunc := val
+		commands = append(commands, &cli.Command{
+			Name:  k,
+			Usage: fmt.Sprintf("Runs %v integration test", key),
+			Action: func(ctx *cli.Context) error {
+				opts := []integration.Option{
+					integration.WithAccess(awsID),
+					integration.WithSecret(awsSecret),
+					integration.WithRegion(region),
+					integration.WithEndpoint(endpoint),
+					integration.WithTLSStatus(tlsStatus),
+				}
+				if debug {
+					opts = append(opts, integration.WithDebug())
+				}
+				if versioningEnabled {
+					opts = append(opts, integration.WithVersioningEnabled())
+				}
+
+				s := integration.NewS3Conf(opts...)
+				err := testFunc(s)
+				return err
+			},
+			Flags: []cli.Flag{
+				&cli.BoolFlag{
+					Name:        "versioning-enabled",
+					Usage:       "Test the bucket object versioning, if the versioning is enabled",
+					Destination: &versioningEnabled,
+					Aliases:     []string{"vs"},
+				},
+			},
+		})
+	}
+	return
 }
